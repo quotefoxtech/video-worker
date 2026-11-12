@@ -1,0 +1,72 @@
+name: Generate Course Video
+
+# Dispatched by the ReadyLMS backend (workflow_dispatch API).
+# Renders a ~60s course video from the script the backend generated, entirely
+# from THIS repo's video_worker/ pipeline — no external folders needed.
+# Uploads every asset (video / images / audio / script) to Cloudinary and
+# publishes progress (p{n}.json) + final result.json for the backend to poll.
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "base64 JSON: {job_id, slug, topic, script}"
+        required: true
+
+defaults:
+  run:
+    working-directory: video_worker
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout backend repo (pipeline included)
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pipeline deps
+        run: pip install requests aiohttp aiohttp-socks pysocks edge-tts pillow cloudinary
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: video_worker/package-lock.json
+
+      - name: Install Remotion deps
+        run: npm ci
+
+      - name: Ensure headless Chrome
+        run: npx remotion browser ensure
+
+      - name: Prepare script.json + pipeline keys
+        env:
+          CAMB_API_KEY: ${{ secrets.CAMB_API_KEY }}
+          CAMB_VOICE_ID: ${{ secrets.CAMB_VOICE_ID }}
+          CAMB_LANG: ${{ secrets.CAMB_LANG }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+          PROXY_LIST: ${{ secrets.PROXY_LIST }}
+        run: python gh_worker.py prepare --payload "${{ inputs.payload }}"
+
+      - name: Render + upload assets
+        env:
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+        run: python gh_worker.py run --cloud-name "$CLOUDINARY_CLOUD_NAME" --api-key "$CLOUDINARY_API_KEY" --api-secret "$CLOUDINARY_API_SECRET"
+
+      - name: Upload run log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: course-video-run-log
+          path: video_worker/topics/**/run.log
+          if-no-files-found: ignore
+          retention-days: 7
